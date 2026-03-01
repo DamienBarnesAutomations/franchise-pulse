@@ -167,7 +167,10 @@ def scan_files(**context):
     log.info(f"Scan complete. Found: {len(found_files)}, Missing: {len(missing)}")
 
     if not found_files:
-        raise ValueError(f"No files found for {run_date}. Check raw data folder.")
+        log.warning(f"No files found for {run_date}. Skipping.")
+        ti.xcom_push(key="found_files", value=[])
+        ti.xcom_push(key="missing", value=STORE_IDS)
+        return
 
     ti.xcom_push(key="found_files", value=found_files)
     ti.xcom_push(key="missing",     value=missing)
@@ -179,6 +182,9 @@ def scan_files(**context):
 def ingest_files(**context):
     ti          = context["ti"]
     found_files = ti.xcom_pull(key="found_files", task_ids="scan_files")
+    if not found_files:
+        log.warning("No files to ingest. Skipping.")
+        return
 
     conn   = get_connection()
     cursor = conn.cursor()
@@ -390,7 +396,7 @@ with DAG(
     default_args=default_args,
     schedule_interval="0 6 * * *",
     start_date=days_ago(1),
-    catchup=False,
+    catchup=True,
     max_active_runs=1,
     tags=["franchisepulse", "sales", "daily"],
 ) as dag:
