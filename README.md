@@ -135,7 +135,7 @@ franchise-pulse/
 ### 1. Clone and set up
 
 ```bash
-git clone https://github.com/<your-username>/franchise-pulse.git
+git clone https://github.com/DamienBarnesAutomations/franchise-pulse.git
 cd franchise-pulse
 
 # Create data folder structure
