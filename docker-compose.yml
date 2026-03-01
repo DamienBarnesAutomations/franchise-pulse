@@ -1,0 +1,162 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.1
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__FERNET_KEY: "81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs="
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: "UTC"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__WEBSERVER__SECRET_KEY: "franchisepulse-secret-key-change-in-prod"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
+    # Connection to SQL Server (used by pipeline DAGs)
+    AIRFLOW_CONN_FRANCHISEPULSE_MSSQL: "mssql://sa:FranchisePulse2024!@sqlserver:1433/FranchisePulse"
+    # Path inside the container where local data folders are mounted
+    PIPELINE_DATA_ROOT: "/opt/airflow/pipeline_data"
+
+  volumes:
+    - ./dags:/opt/airflow/dags               # Your Airflow DAG files
+    - ./logs:/opt/airflow/logs               # Airflow execution logs
+    - ./scripts:/opt/airflow/scripts         # Python helper scripts
+    - ./sql:/opt/airflow/sql                 # SQL scripts callable from DAGs
+    - ./data:/opt/airflow/pipeline_data      # Simulated ADLS folders
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+  networks:
+    - franchisepulse-net
+
+services:
+
+  # -----------------------------------------------------------
+  # SQL SERVER 2022
+  # Simulates: Azure SQL Database
+  # Port 1433 exposed to host — connect with SSMS or Azure Data Studio
+  # Credentials: sa / FranchisePulse2024!
+  # -----------------------------------------------------------
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: franchisepulse-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: ${SQL_SERVER_SA_PASSWORD}
+      MSSQL_PID: "Developer"          # Free Developer Edition
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql  # Persistent data volume
+      - ./data:/tmp/pipeline_data  
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/mssql-tools18/bin/sqlcmd",
+          "-S", "localhost",
+          "-U", "${SQL_SERVER_USER}",
+          "-P", "${SQL_SERVER_SA_PASSWORD}",
+          "-Q", "SELECT 1",
+          "-No"
+        ]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - franchisepulse-net
+
+  # -----------------------------------------------------------
+  # AIRFLOW METADATA DATABASE (PostgreSQL)
+  # Internal use only — Airflow stores its own state here
+  # Not related to your pipeline data
+  # -----------------------------------------------------------
+  airflow-postgres:
+    image: postgres:15
+    container_name: franchisepulse-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - franchisepulse-net
+
+  # -----------------------------------------------------------
+  # AIRFLOW INIT
+  # Runs once on first startup to initialise the DB and create
+  # the default admin user
+  # -----------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: franchisepulse-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install apache-airflow-providers-microsoft-mssql
+        airflow db upgrade
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Franchise \
+          --lastname Pulse \
+          --role Admin \
+          --email admin@franchisepulse.local
+        echo "Airflow initialised."
+    restart: "no"
+
+  # -----------------------------------------------------------
+  # AIRFLOW SCHEDULER
+  # The brain — reads DAGs and triggers tasks on schedule
+  # -----------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: franchisepulse-airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      sqlserver:
+        condition: service_healthy
+
+  # -----------------------------------------------------------
+  # AIRFLOW WEBSERVER
+  # UI at http://localhost:8080
+  # Login: admin / admin
+  # -----------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: franchisepulse-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+# -----------------------------------------------------------
+# VOLUMES — persistent storage that survives container restarts
+# -----------------------------------------------------------
+volumes:
+  sqlserver-data:
+    name: franchisepulse-sqlserver-data
+  airflow-postgres-data:
+    name: franchisepulse-airflow-postgres-data
+
+# -----------------------------------------------------------
+# NETWORK — all containers talk to each other on this network
+# -----------------------------------------------------------
+networks:
+  franchisepulse-net:
+    name: franchisepulse-net
+    driver: bridge
