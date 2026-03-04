@@ -326,6 +326,17 @@ def archive_files(**context):
 
     log.info(f"Archiving complete. {len(found_files)} files moved.")
 
+def run_dbt(**context):
+    import subprocess
+    result = subprocess.run(
+        ["docker", "exec", "franchise-pulse-dbt", "dbt", "run"],
+        capture_output=True,
+        text=True
+    )
+    log.info(result.stdout)
+    if result.returncode != 0:
+        log.error(result.stderr)
+        raise Exception(f"dbt run failed:\n{result.stderr}")
 
 # -----------------------------------------------------------
 # Task 7 — end_run
@@ -395,7 +406,7 @@ with DAG(
     description="Daily sales pipeline for 12 FranchisePulse locations",
     default_args=default_args,
     schedule_interval="0 6 * * *",
-    start_date=days_ago(1),
+    start_date=datetime(2025, 12, 2),
     catchup=True,
     max_active_runs=1,
     tags=["franchisepulse", "sales", "daily"],
@@ -435,6 +446,10 @@ with DAG(
         task_id="end_run",
         python_callable=end_run,
     )
+    t8_dbt_run = PythonOperator(
+        task_id="dbt_run",
+        python_callable=run_dbt,
+    )
 
     # Linear pipeline — each stage depends on previous success
-    t1_start_run >> t2_scan_files >> t3_ingest_files >> t4_validate_rows >> t5_load_fact >> t6_archive_files >> t7_end_run
+    t1_start_run >> t2_scan_files >> t3_ingest_files >> t4_validate_rows >> t5_load_fact >> t6_archive_files >> t7_end_run >> t8_dbt_run

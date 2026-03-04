@@ -9,17 +9,17 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
     AIRFLOW__WEBSERVER__SECRET_KEY: "franchisepulse-secret-key-change-in-prod"
     AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
-    # Connection to SQL Server (used by pipeline DAGs)
     AIRFLOW_CONN_FRANCHISEPULSE_MSSQL: "mssql://sa:FranchisePulse2024!@sqlserver:1433/FranchisePulse"
-    # Path inside the container where local data folders are mounted
     PIPELINE_DATA_ROOT: "/opt/airflow/pipeline_data"
 
   volumes:
-    - ./dags:/opt/airflow/dags               # Your Airflow DAG files
-    - ./logs:/opt/airflow/logs               # Airflow execution logs
-    - ./scripts:/opt/airflow/scripts         # Python helper scripts
-    - ./sql:/opt/airflow/sql                 # SQL scripts callable from DAGs
-    - ./data:/opt/airflow/pipeline_data      # Simulated ADLS folders
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./scripts:/opt/airflow/scripts
+    - ./sql:/opt/airflow/sql
+    - ./data:/opt/airflow/pipeline_data
+    - /var/run/docker.sock:/var/run/docker.sock
+
   depends_on:
     airflow-postgres:
       condition: service_healthy
@@ -31,8 +31,6 @@ services:
   # -----------------------------------------------------------
   # SQL SERVER 2022
   # Simulates: Azure SQL Database
-  # Port 1433 exposed to host — connect with SSMS or Azure Data Studio
-  # Credentials: sa / FranchisePulse2024!
   # -----------------------------------------------------------
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -40,12 +38,12 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       SA_PASSWORD: ${SQL_SERVER_SA_PASSWORD}
-      MSSQL_PID: "Developer"          # Free Developer Edition
+      MSSQL_PID: "Developer"
     ports:
       - "1433:1433"
     volumes:
-      - sqlserver-data:/var/opt/mssql  # Persistent data volume
-      - ./data:/tmp/pipeline_data  
+      - sqlserver-data:/var/opt/mssql
+      - ./data:/tmp/pipeline_data
     healthcheck:
       test:
         [
@@ -64,9 +62,7 @@ services:
       - franchisepulse-net
 
   # -----------------------------------------------------------
-  # AIRFLOW METADATA DATABASE (PostgreSQL)
-  # Internal use only — Airflow stores its own state here
-  # Not related to your pipeline data
+  # AIRFLOW METADATA DATABASE
   # -----------------------------------------------------------
   airflow-postgres:
     image: postgres:15
@@ -86,8 +82,6 @@ services:
 
   # -----------------------------------------------------------
   # AIRFLOW INIT
-  # Runs once on first startup to initialise the DB and create
-  # the default admin user
   # -----------------------------------------------------------
   airflow-init:
     <<: *airflow-common
@@ -110,13 +104,15 @@ services:
 
   # -----------------------------------------------------------
   # AIRFLOW SCHEDULER
-  # The brain — reads DAGs and triggers tasks on schedule
   # -----------------------------------------------------------
   airflow-scheduler:
     <<: *airflow-common
     container_name: franchisepulse-airflow-scheduler
     command: scheduler
     restart: unless-stopped
+    environment:
+      <<: *airflow-common-env
+      DOCKER_API_VERSION: "1.44"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -125,8 +121,7 @@ services:
 
   # -----------------------------------------------------------
   # AIRFLOW WEBSERVER
-  # UI at http://localhost:8080
-  # Login: admin / admin
+  # UI at http://localhost:8080 — admin / admin
   # -----------------------------------------------------------
   airflow-webserver:
     <<: *airflow-common
@@ -144,8 +139,29 @@ services:
       timeout: 10s
       retries: 5
 
+  # -----------------------------------------------------------
+  # DBT
+  # Transformation layer — triggered by Airflow after ingestion
+  # Image published from franchise-pulse-dbt repo
+  # ghcr.io/damienbarnesautomations/franchise-pulse-dbt:latest
+  # -----------------------------------------------------------
+  dbt:
+    image: ghcr.io/damienbarnesautomations/franchise-pulse-dbt:latest
+    container_name: franchise-pulse-dbt
+    volumes:
+      - ./dbt/profiles.yml:/usr/app/profiles.yml
+    environment:
+      - DBT_PROFILES_DIR=/usr/app
+    working_dir: /usr/app
+    entrypoint: ["tail", "-f", "/dev/null"]
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    networks:
+      - franchisepulse-net
+
 # -----------------------------------------------------------
-# VOLUMES — persistent storage that survives container restarts
+# VOLUMES
 # -----------------------------------------------------------
 volumes:
   sqlserver-data:
@@ -154,7 +170,7 @@ volumes:
     name: franchisepulse-airflow-postgres-data
 
 # -----------------------------------------------------------
-# NETWORK — all containers talk to each other on this network
+# NETWORK
 # -----------------------------------------------------------
 networks:
   franchisepulse-net:
